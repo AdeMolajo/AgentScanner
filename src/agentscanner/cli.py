@@ -3,6 +3,7 @@
 import click
 from pathlib import Path
 from agentscanner.scanner import AgentScanner
+from urllib.parse import urlparse
 
 
 @click.group()
@@ -13,7 +14,7 @@ def cli():
 
 
 @cli.command()
-@click.argument("path", type=click.Path(exists=True))
+@click.argument("path")
 @click.option("--format", "-f",
               type=click.Choice(["terminal", "json", "markdown", "sarif"]),
               default="terminal",
@@ -34,8 +35,15 @@ def scan(path: str, format: str, output: str, no_llm: bool, provider: str):
     - Local directories: agentscanner scan ./my-agent/
     - Single files: agentscanner scan ./SKILL.md
     - Git repositories: agentscanner scan https://github.com/user/my-agent
+    - Notion pages: agentscanner scan https://notion.site/...
     - ZIP files: agentscanner scan ./my-agent.zip
     """
+    # Validate path - allow URLs or local paths
+    is_url = path.startswith(("http://", "https://"))
+    if not is_url and not Path(path).exists():
+        click.echo(f"Error: Path '{path}' does not exist.", err=True)
+        raise click.Exit(1)
+
     click.echo(f"Scanning: {path}")
 
     scanner = AgentScanner(provider=provider if not no_llm else None)

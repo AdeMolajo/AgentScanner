@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
+import requests
+from bs4 import BeautifulSoup
 
 
 class ScanResult(BaseModel):
@@ -34,16 +36,96 @@ class AgentScanner:
         Returns:
             ScanResult with findings
         """
-        target_path = Path(path)
         result = ScanResult(agent_path=path)
 
-        # TODO: Implement actual scanning logic
-        # - Parse agent/skill files
-        # - Static analysis checks
-        # - Optional semantic analysis with LLM
+        # Check if it's a URL
+        if path.startswith(("http://", "https://")):
+            return self._scan_url(path, result)
+
+        # Handle local paths
+        target_path = Path(path)
+        return self._scan_local(target_path, result)
+
+    def _scan_url(self, url: str, result: ScanResult) -> ScanResult:
+        """Scan a remote URL (webpage, Notion, etc)."""
+        try:
+            headers = {
+                "User-Agent": "AgentScanner/0.1.0 (https://github.com/AdeMolajo/AgentScanner)"
+            }
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+
+            # Parse HTML content
+            soup = BeautifulSoup(response.content, "html.parser")
+            text_content = soup.get_text(separator="\n", strip=True)
+
+            # Store metadata
+            result.info = {
+                "url": url,
+                "status_code": response.status_code,
+                "content_type": response.headers.get("content-type", ""),
+                "content_length": len(text_content),
+                "lines": len(text_content.split("\n")),
+                "title": soup.title.string if soup.title else "No title",
+            }
+
+            self._analyze_content(text_content, result)
+
+        except requests.exceptions.RequestException as e:
+            result.issues.append({
+                "type": "fetch_error",
+                "message": f"Failed to fetch URL: {str(e)}",
+                "severity": "error"
+            })
 
         self.results.append(result)
         return result
+
+    def _scan_local(self, path: Path, result: ScanResult) -> ScanResult:
+        """Scan a local file or directory."""
+        if path.is_file():
+            content = path.read_text(encoding="utf-8", errors="ignore")
+            result.info = {
+                "path": str(path),
+                "type": "file",
+                "size": path.stat().st_size,
+                "extension": path.suffix,
+            }
+            self._analyze_content(content, result)
+
+        elif path.is_dir():
+            result.info = {
+                "path": str(path),
+                "type": "directory",
+                "files": len(list(path.glob("**/*"))),
+            }
+            for file_path in path.glob("**/*"):
+                if file_path.is_file() and not file_path.name.startswith("."):
+                    try:
+                        content = file_path.read_text(encoding="utf-8", errors="ignore")
+                        self._analyze_content(content, result)
+                    except Exception:
+                        pass
+
+        self.results.append(result)
+        return result
+
+    def _analyze_content(self, content: str, result: ScanResult) -> None:
+        """Perform static analysis on content."""
+        import re
+        suspicious_patterns = [
+            ("sql_injection", r"SELECT\s+.*\s+FROM", "Potential SQL injection pattern"),
+            ("hardcoded_secret", r"(api_key|password|secret|token)\s*[=:]\s*['\"]", "Potential hardcoded secret"),
+            ("eval_usage", r"\beval\s*\(", "Use of eval() detected"),
+        ]
+
+        for pattern_name, pattern, message in suspicious_patterns:
+            if re.search(pattern, content, re.IGNORECASE):
+                result.warnings.append({
+                    "type": pattern_name,
+                    "message": message,
+                    "severity": "warning"
+                })
 
     def get_results(self, format: str = "terminal") -> str:
         """Get formatted scan results.
