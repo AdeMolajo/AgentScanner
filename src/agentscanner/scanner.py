@@ -7,6 +7,8 @@ import requests
 from bs4 import BeautifulSoup
 import asyncio
 from playwright.async_api import async_playwright
+from docx import Document as DocxDocument
+from PyPDF2 import PdfReader
 
 
 class ScanResult(BaseModel):
@@ -185,12 +187,13 @@ class AgentScanner:
     def _scan_local(self, path: Path, result: ScanResult) -> ScanResult:
         """Scan a local file or directory."""
         if path.is_file():
-            content = path.read_text(encoding="utf-8", errors="ignore")
+            content = self._extract_file_content(path)
             result.info = {
                 "path": str(path),
                 "type": "file",
                 "size": path.stat().st_size,
                 "extension": path.suffix,
+                "content_extracted": bool(content),
             }
             self._analyze_content(content, result)
 
@@ -203,13 +206,46 @@ class AgentScanner:
             for file_path in path.glob("**/*"):
                 if file_path.is_file() and not file_path.name.startswith("."):
                     try:
-                        content = file_path.read_text(encoding="utf-8", errors="ignore")
-                        self._analyze_content(content, result)
+                        content = self._extract_file_content(file_path)
+                        if content:
+                            self._analyze_content(content, result)
                     except Exception:
                         pass
 
         self.results.append(result)
         return result
+
+    def _extract_file_content(self, path: Path) -> str:
+        """Extract text content from various file formats."""
+        try:
+            suffix = path.suffix.lower()
+
+            # Handle DOCX files
+            if suffix == ".docx":
+                try:
+                    doc = DocxDocument(str(path))
+                    content = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+                    return content
+                except Exception as e:
+                    return f"[Error reading DOCX: {str(e)}]"
+
+            # Handle PDF files
+            elif suffix == ".pdf":
+                try:
+                    reader = PdfReader(str(path))
+                    content = ""
+                    for page in reader.pages:
+                        content += page.extract_text() + "\n"
+                    return content
+                except Exception as e:
+                    return f"[Error reading PDF: {str(e)}]"
+
+            # Handle regular text files
+            else:
+                return path.read_text(encoding="utf-8", errors="ignore")
+
+        except Exception:
+            return ""
 
     def _analyze_content(self, content: str, result: ScanResult) -> None:
         """Perform static analysis on content."""
