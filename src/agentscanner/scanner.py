@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
 import requests
 from bs4 import BeautifulSoup
+import asyncio
+from playwright.async_api import async_playwright
 
 
 class ScanResult(BaseModel):
@@ -48,6 +50,15 @@ class AgentScanner:
 
     def _scan_url(self, url: str, result: ScanResult) -> ScanResult:
         """Scan a remote URL (webpage, Notion, etc)."""
+        # Check if URL requires JavaScript rendering (Notion, etc)
+        if "notion.site" in url or "notion.so" in url:
+            return self._scan_url_with_js(url, result)
+
+        # Otherwise use static HTML fetching
+        return self._scan_url_static(url, result)
+
+    def _scan_url_static(self, url: str, result: ScanResult) -> ScanResult:
+        """Scan a URL with static HTML parsing."""
         try:
             headers = {
                 "User-Agent": "AgentScanner/0.1.0 (https://github.com/AdeMolajo/AgentScanner)"
@@ -67,6 +78,7 @@ class AgentScanner:
                 "content_length": len(text_content),
                 "lines": len(text_content.split("\n")),
                 "title": soup.title.string if soup.title else "No title",
+                "render_method": "static",
             }
 
             self._analyze_content(text_content, result)
@@ -80,6 +92,95 @@ class AgentScanner:
 
         self.results.append(result)
         return result
+
+    def _scan_url_with_js(self, url: str, result: ScanResult) -> ScanResult:
+        """Scan a URL with JavaScript rendering using Playwright."""
+        try:
+            text_content = asyncio.run(self._fetch_with_playwright(url))
+
+            # Check if we got meaningful content or hit Cloudflare
+            is_cloudflare_challenge = (
+                "Just a moment" in text_content or
+                "Enable JavaScript and cookies" in text_content or
+                "Cloudflare" in text_content
+            )
+
+            # Store metadata
+            result.info = {
+                "url": url,
+                "status_code": 200,
+                "content_type": "text/html",
+                "content_length": len(text_content),
+                "lines": len(text_content.split("\n")),
+                "render_method": "javascript",
+                "note": "Rendered with Playwright",
+            }
+
+            if is_cloudflare_challenge:
+                result.warnings.append({
+                    "type": "cloudflare_protection",
+                    "message": "Page is protected by Cloudflare - content may be incomplete",
+                    "severity": "warning"
+                })
+
+            self._analyze_content(text_content, result)
+
+        except Exception as e:
+            result.issues.append({
+                "type": "render_error",
+                "message": f"Failed to render URL with JavaScript: {str(e)}",
+                "severity": "error"
+            })
+
+        self.results.append(result)
+        return result
+
+    async def _fetch_with_playwright(self, url: str) -> str:
+        """Fetch and render a URL using Playwright."""
+        async with async_playwright() as p:
+            # Launch with more realistic browser settings to bypass bot detection
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-dev-shm-usage',
+                ]
+            )
+            page = await browser.new_page(
+                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+            )
+
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                # Wait for dynamic content and bot challenges
+                await page.wait_for_timeout(5000)
+
+                # Try to get content from multiple sources
+                text_content = await page.evaluate("""
+                    () => {
+                        // Try various methods to get content
+                        let content = '';
+
+                        // Try body innerText
+                        if (document.body.innerText) {
+                            content = document.body.innerText;
+                        }
+
+                        // If minimal content, try documentElement
+                        if (!content || content.length < 100) {
+                            content = document.documentElement.textContent || '';
+                        }
+
+                        // Remove excessive whitespace
+                        content = content.replace(/\\s+/g, ' ').trim();
+
+                        return content;
+                    }
+                """)
+
+                return text_content
+            finally:
+                await browser.close()
 
     def _scan_local(self, path: Path, result: ScanResult) -> ScanResult:
         """Scan a local file or directory."""

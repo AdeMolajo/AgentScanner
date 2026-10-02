@@ -1,0 +1,1 @@
+## https://four-calendula-185.notion.site/get-found-the-magnetic-linkedin-profile-skill
