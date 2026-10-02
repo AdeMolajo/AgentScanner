@@ -27,3 +27,12 @@ build/
 
 # Logs
 *.log
+
+# Test coverage
+.coverage
+.coverage.*
+htmlcov/
+
+# Generated reports
+scan_report.*
+reports/
